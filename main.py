@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- Constants ---
 # 使用环境变量获取TOKEN，如果不存在则使用默认值
-TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "MTM2MDY0MzAzNDkzMjU4MDUwOA.G5oP7r.de2hW9bHc4blaZh8YBC4Z9rCBzPFerWO-wCIx8")
 # 使用相对路径，便于跨平台部署
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "warnings_data.json")
