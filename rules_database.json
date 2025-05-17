@@ -1,0 +1,124 @@
+{
+  "rules_config": {
+    "version": "1.0.0",
+    "last_updated_by": "Manus",
+    "update_timestamp": "2025-05-14T04:50:00Z",
+    "description": "滑稽 VMware15 交流群规则与惩罚定义数据库"
+  },
+  "rules": [
+    {
+      "id": "1",
+      "text": "但凡违反法律法规, 按照《普通违反群规处理办法》(见底附);",
+      "action_type": "general_violation",
+      "keywords_for_mapping": ["法律法规", "违法"]
+    },
+    {
+      "id": "2",
+      "text": "进入群聊请将本群昵称改为哔哩哔哩账号名。(根据本群昵称无法找到B站账号的, 您的本群昵称可能会被改成“未知B站账号”, 超过30天则暂时移除出群聊);",
+      "action_type": "specific_action",
+      "actions": [
+        {
+          "type": "monitor_nickname_compliance",
+          "details": "新成员需将昵称改为B站账号名。若30天未改，可能被移除。",
+          "initial_warning_message_to_user_template": "欢迎您！请在30天内将您在本服务器的昵称修改为您的哔哩哔哩账号名，否则可能会被暂时移出服务器 (规则2)。",
+          "admin_notification_on_non_compliance_after_days": 30,
+          "action_on_non_compliance": {
+            "type": "temp_remove_from_group",
+            "reason_template": "因超过30天未将群昵称修改为B站账号名 (规则2)。"
+          }
+        }
+      ],
+      "keywords_for_mapping": ["昵称", "哔哩哔哩", "B站", "改名"]
+    },
+    {
+      "id": "3",
+      "text": "群内不能发表敏感言论(纯政治等请私聊), 违规按照《普通违反群规则处理办法》进行处理;",
+      "action_type": "general_violation",
+      "keywords_for_mapping": ["敏感言论", "政治", "不当言论"]
+    },
+    {
+      "id": "4",
+      "text": "恶意泄漏他人隐私信息, 捏造传播不实消息等恶意行为, 按照《普通违反群规则处理》处理;",
+      "action_type": "general_violation",
+      "keywords_for_mapping": ["隐私", "泄露", "不实消息", "谣言"]
+    },
+    {
+      "id": "5",
+      "text": "本群不欢迎各类买卖、广告, 请自觉退出, 违者直接移出群聊;",
+      "action_type": "specific_action",
+      "actions": [
+        {
+          "type": "permanent_remove_from_group",
+          "reason_template": "发布买卖/广告信息 (规则5)。"
+        }
+      ],
+      "keywords_for_mapping": ["买卖", "广告", "交易"]
+    },
+    {
+      "id": "6",
+      "text": "请尊重群内的所有人, 违规按照《普通违反群规则处理》;",
+      "action_type": "general_violation",
+      "keywords_for_mapping": ["尊重", "不尊重", "人身攻击"]
+    },
+    {
+      "id": "7",
+      "text": "不能刷屏。(根据次数而定时间)(刷屏定义为10秒内发送超过5条信息或连续发送相同信息超过10条), 违规按照《普通违反群规则处理》;",
+      "action_type": "general_violation",
+      "definition_note": "刷屏定义为10秒内发送超过5条信息或连续发送相同信息超过10条。管理员可根据刷屏严重程度判断通用惩罚的等级。",
+      "keywords_for_mapping": ["刷屏", "spam"]
+    },
+    {
+      "id": "8",
+      "text": "管理员部的滥用权限, 否则立即撤销职位。",
+      "action_type": "specific_action",
+      "target_role_category": "admin",
+      "actions": [
+        {
+          "type": "revoke_admin_role",
+          "reason_template": "滥用管理员权限 (规则8)。"
+        }
+      ],
+      "keywords_for_mapping": ["管理员权限", "滥用职权"]
+    }
+  ],
+  "general_punishment_ladder": [
+    { "threshold": 1, "action": "mute", "duration_minutes": 15, "description_template": "第{count}次违反群规: 禁言15分钟。" },
+    { "threshold": 2, "action": "mute", "duration_hours": 3, "description_template": "第{count}次违反群规: 禁言3小时。" },
+    { "threshold": 3, "action": "remove_temporary", "can_rejoin": true, "description_template": "第{count}次违反群规: 移除群聊 (可重新加入)。" },
+    { "threshold": 4, "action": "ban_permanent", "description_template": "第{count}次违反群规: 永久禁止加入群聊。" }
+  ],
+  "server_policies_and_procedures": [
+      {
+          "id": "policy_group_files_upload",
+          "category": "群文件规定",
+          "description": "文件尽量以压缩包上传, 请先提交给群主或管理员(把文件类型, 内容等写在文件名称), 管理员加以审核。若侵权被原作者找到, 有关的成员后果自负。 (源规则9)"
+      },
+      {
+          "id": "policy_admin_rules",
+          "category": "管理员规定",
+          "description": "(1) 不活跃的管理员可能被撤除, 但不会接受《普通违反群规则处理》; (2) 申请管理员请等待测试通道开放; (源规则10)"
+      },
+      {
+          "id": "policy_member_activity_check",
+          "category": "成员活跃规定",
+          "description": "(人数大于八十人时实行) 对于180天不发言的成员移出该群(中考、高考除外, 加入一年以上群成员除外)。 (源规则11)",
+          "implementation_note": "此功能需要单独的活跃度检测模块。"
+      },
+      {
+          "id": "policy_rule_suggestions",
+          "category": "规则建议",
+          "description": "欢迎群聊成员提出关于交流群规则的建议, 但禁止非群主的群聊成员直接更改交流群规则。 (源规则12)"
+      },
+      {
+          "id": "policy_punishment_adjustment",
+          "category": "处罚调整权",
+          "description": "所有处罚标准仅供参考, 可由实际情况进行调整。 (源规则13)"
+      },
+      {
+          "id": "policy_final_interpretation",
+          "category": "最终解释权",
+          "description": "若有纠纷、争议, 本群规则最终解释权为滑稽 VMware15 所有。 (源规则14)"
+      }
+  ]
+}
+
