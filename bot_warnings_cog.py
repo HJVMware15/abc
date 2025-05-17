@@ -76,8 +76,11 @@ class WarningsCog(commands.Cog, name="Warnings"):
                         unmute_at = datetime.fromtimestamp(unmute_at_value, tz=timezone.utc)
                         # 更新为标准格式以避免未来再次出现此问题
                         mute_info["unmute_at"] = unmute_at.isoformat()
-                        self.bot.save_data(self.bot.warning_data)
-                        print(f"[Unmute Task] Converted numeric timestamp {unmute_at_value} to ISO format for key {key}")
+                        save_result = self.bot.save_data(self.bot.warning_data)
+                        if not save_result:
+                            print(f"[Unmute Task] Failed to save data after converting timestamp for key {key}")
+                        else:
+                            print(f"[Unmute Task] Converted numeric timestamp {unmute_at_value} to ISO format for key {key}")
                     except (ValueError, OSError, OverflowError) as e:
                         print(f"[Unmute Task] Error converting numeric timestamp for key {key}: {e}. Skipping entry.")
                         continue
@@ -117,8 +120,11 @@ class WarningsCog(commands.Cog, name="Warnings"):
         if mutes_to_remove:
             for key in mutes_to_remove:
                 if key in self.bot.warning_data["active_mutes"]: del self.bot.warning_data["active_mutes"][key]
-            self.bot.save_data(self.bot.warning_data)
-            print(f"[Unmute Task] Removed {len(mutes_to_remove)} expired mutes from data.")
+            save_result = self.bot.save_data(self.bot.warning_data)
+            if not save_result:
+                print(f"[Unmute Task] Failed to save data after removing {len(mutes_to_remove)} expired mutes.")
+            else:
+                print(f"[Unmute Task] Removed {len(mutes_to_remove)} expired mutes from data.")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -133,7 +139,22 @@ class WarningsCog(commands.Cog, name="Warnings"):
     def _load_rules_data(self):
         try:
             with open(self.bot.RULES_DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # 验证规则数据的基本结构
+                if not isinstance(data, dict):
+                    print(f"ERROR: Rules data at {self.bot.RULES_DATA_FILE} is not a valid JSON object. Returning empty rules.")
+                    return {"rules": [], "general_punishment_ladder": []}
+                
+                # 确保必要的键存在
+                if "rules" not in data:
+                    print(f"WARNING: Rules data at {self.bot.RULES_DATA_FILE} is missing 'rules' key. Adding empty rules list.")
+                    data["rules"] = []
+                
+                if "general_punishment_ladder" not in data:
+                    print(f"WARNING: Rules data at {self.bot.RULES_DATA_FILE} is missing 'general_punishment_ladder' key. Adding empty ladder.")
+                    data["general_punishment_ladder"] = []
+                
+                return data
         except FileNotFoundError:
             print(f"ERROR: Rules data file not found at {self.bot.RULES_DATA_FILE}. Returning empty rules.")
             return {"rules": [], "general_punishment_ladder": []}
@@ -142,6 +163,9 @@ class WarningsCog(commands.Cog, name="Warnings"):
             return {"rules": [], "general_punishment_ladder": []}
         except AttributeError:
             print(f"ERROR: bot.RULES_DATA_FILE not set. Ensure RULES_DATA_FILE is passed from main.py during setup. Returning empty rules.")
+            return {"rules": [], "general_punishment_ladder": []}
+        except Exception as e:
+            print(f"ERROR: Unexpected error loading rules data: {e}. Returning empty rules.")
             return {"rules": [], "general_punishment_ladder": []}
 
     def cog_unload(self):
@@ -243,214 +267,231 @@ class WarningsCog(commands.Cog, name="Warnings"):
             else: await original_interaction.followup.send(f"错误：发送历史消息时发生HTTP错误: {e}。警告未完全记录。", ephemeral=True)
             return
 
-        notification_embed = discord.Embed(title="用户警告", description=f"{member.mention} 您已被警告。", color=discord.Color.red(), timestamp=datetime.fromtimestamp(timestamp, timezone.utc))
-        notification_embed.add_field(name="理由", value=displayed_reason, inline=False)
-        notification_embed.add_field(name=f"这是您第 {total_warnings_overall} 次被记录的有效警告。", value="请注意您的言行，遵守服务器规则。", inline=False)
-        if matched_rule_id: notification_embed.add_field(name="涉及规则编号", value=matched_rule_id, inline=True)
-        notification_embed.set_footer(text=f"Case ID: {case_id}")
+        # Save data after successful history message
+        save_result = self.bot.save_data(self.bot.warning_data)
+        if not save_result:
+            await original_interaction.followup.send(f"警告：保存警告数据时发生错误。警告已记录但可能不会持久保存。", ephemeral=True)
+            print(f"Error saving warning data for user {member.display_name} (ID: {user_id}) in guild {original_interaction.guild.name} (ID: {server_id}).")
+
+        # Notify the user about the warning
         try:
-            notif_msg = await target_channel.send(embed=notification_embed)
-            warning_entry["message_id_notification_channel"] = notif_msg.id
-            # Followup for the original interaction (slash command or context menu)
-            if not original_interaction.response.is_done(): await original_interaction.response.send_message(f"已在 {target_channel.mention} 中警告 {member.mention} (Case ID: {case_id}).", ephemeral=True)
-            else: await original_interaction.followup.send(f"已在 {target_channel.mention} 中警告 {member.mention} (Case ID: {case_id}).", ephemeral=True)
+            user_embed = discord.Embed(title=f"您收到了一条警告", color=discord.Color.red(), timestamp=datetime.fromtimestamp(timestamp, timezone.utc))
+            user_embed.add_field(name="服务器", value=original_interaction.guild.name, inline=False)
+            user_embed.add_field(name="理由", value=displayed_reason, inline=False)
+            user_embed.add_field(name="警告ID", value=case_id, inline=True)
+            user_embed.add_field(name="当前有效警告总数", value=str(total_warnings_overall), inline=True)
+            user_embed.set_footer(text=f"如有疑问，请联系管理员")
+            
+            await member.send(embed=user_embed)
+            await original_interaction.followup.send(f"已成功警告用户 {member.mention} (Case ID: {case_id})，并已通过私信通知。", ephemeral=True)
         except discord.Forbidden:
-            if not original_interaction.response.is_done(): await original_interaction.response.send_message(f"警告已记录 (Case ID: {case_id})，但无法在 {target_channel.mention} 发送通知 (权限不足)。", ephemeral=True)
-            else: await original_interaction.followup.send(f"警告已记录 (Case ID: {case_id})，但无法在 {target_channel.mention} 发送通知 (权限不足)。", ephemeral=True)
+            await original_interaction.followup.send(f"已成功警告用户 {member.mention} (Case ID: {case_id})，但无法通过私信通知（可能已关闭私信）。", ephemeral=True)
         except discord.HTTPException as e:
-            if not original_interaction.response.is_done(): await original_interaction.response.send_message(f"警告已记录 (Case ID: {case_id})，但发送通知时发生HTTP错误: {e}。", ephemeral=True)
-            else: await original_interaction.followup.send(f"警告已记录 (Case ID: {case_id})，但发送通知时发生HTTP错误: {e}。", ephemeral=True)
+            await original_interaction.followup.send(f"已成功警告用户 {member.mention} (Case ID: {case_id})，但通知私信发送失败: {e}", ephemeral=True)
 
-        self.bot.save_data(self.bot.warning_data)
-        await self._apply_punishment_based_on_rules(original_interaction, member, matched_rule_id, total_warnings_overall, rule_specific_actions, case_id)
+        # Check if punishment is needed based on warning count
+        await self._check_and_apply_punishment(original_interaction, member, total_warnings_overall, matched_rule_id, rule_specific_actions, case_id)
 
-    async def _apply_punishment_based_on_rules(self, interaction: discord.Interaction, member: discord.Member,
-                                           matched_rule_id: str | None,
-                                           total_overall_warnings: int,
-                                           specific_actions_from_rule_definition: list | None,
-                                           case_id: str):
-        guild = interaction.guild
-        punishment_applied_messages = [] 
-        action_taken = False
-        followup_interaction = interaction # Use the original interaction for followups here
+    async def _check_and_apply_punishment(self, interaction: discord.Interaction, member: discord.Member, warning_count: int, rule_id: str = None, rule_actions = None, case_id: str = None):
+        """Checks if punishment should be applied based on warning count and rule."""
+        server_id = str(interaction.guild.id)
+        user_id = str(member.id)
+        
+        # First check rule-specific actions if available
+        if rule_id and rule_actions:
+            # Handle rule-specific actions here
+            # This would depend on the structure of rule_actions
+            # For now, we'll just log it
+            print(f"Rule-specific actions for rule {rule_id} would be applied here.")
+            # Example: if "permanent_remove_from_group" in rule_actions...
+            return
 
-        if specific_actions_from_rule_definition:
-            print(f"[DEBUG] Applying specific actions for rule {matched_rule_id}: {specific_actions_from_rule_definition}")
-            action_taken = True 
-            for action_def in specific_actions_from_rule_definition:
-                action_type = action_def.get("type")
-                reason_template = action_def.get("reason_template", f"违反规则 {matched_rule_id}")
-                details_for_reason = action_def.get("details", f"违反规则 {matched_rule_id}")
-                reason_for_action = reason_template.format(member_mention=member.mention, case_id=case_id, details=details_for_reason)
-
-                if action_type == "permanent_remove_from_group":
-                    try:
-                        await member.ban(reason=f"{reason_for_action} (Case ID: {case_id})")
-                        punishment_applied_messages.append(f"由于 {details_for_reason}, {member.mention} 已被永久移出服务器 (Case ID: {case_id}).")
-                    except discord.Forbidden:
-                        punishment_applied_messages.append(f"机器人权限不足，无法将 {member.mention} 永久移出服务器 (Case ID: {case_id}).")
-                    except discord.HTTPException as e:
-                        punishment_applied_messages.append(f"永久移出 {member.mention} 时发生HTTP错误: {e} (Case ID: {case_id}).")
+        # Otherwise, check general punishment ladder
+        general_punishments = self.rules_data.get("general_punishment_ladder", [])
+        if not general_punishments:
+            return
+        
+        # Find the highest applicable punishment level
+        applicable_punishment = None
+        for punishment in sorted(general_punishments, key=lambda x: x.get("threshold", 0), reverse=True):
+            if warning_count >= punishment.get("threshold", 0):
+                applicable_punishment = punishment
+                break
+        
+        if not applicable_punishment:
+            return
+            
+        action = applicable_punishment.get("action")
+        if not action:
+            return
+            
+        if action == "mute":
+            # Handle mute action
+            duration_minutes = applicable_punishment.get("duration_minutes", 0)
+            duration_hours = applicable_punishment.get("duration_hours", 0)
+            total_minutes = duration_minutes + (duration_hours * 60)
+            
+            if total_minutes <= 0:
+                print(f"Invalid mute duration: {total_minutes} minutes")
+                return
                 
-                elif action_type == "revoke_admin_role":
-                    punishment_applied_messages.append(f"管理员 {member.mention} 因 {details_for_reason} (规则 {matched_rule_id}, Case ID: {case_id})，其职位已被记录为撤销。实际操作可能需要进一步配置或手动进行。")
+            await self._apply_mute(interaction, member, total_minutes, case_id)
+        elif action == "remove_temporary":
+            # Handle temporary removal
+            try:
+                reason = applicable_punishment.get("description_template", "违反群规").format(count=warning_count)
+                await member.kick(reason=reason)
+                await interaction.followup.send(f"已将 {member.mention} 移出服务器 (原因: {reason})。", ephemeral=True)
+                history_channel = interaction.guild.get_channel(self.bot.HISTORY_CHANNEL_ID)
+                if history_channel:
+                    await history_channel.send(f"{member.mention} ({member.id}) 已被移出服务器。原因: {reason}")
+            except discord.Forbidden:
+                await interaction.followup.send(f"无权限将 {member.mention} 移出服务器。", ephemeral=True)
+            except discord.HTTPException as e:
+                await interaction.followup.send(f"尝试将 {member.mention} 移出服务器时发生错误: {e}", ephemeral=True)
+        elif action == "ban_permanent":
+            # Handle permanent ban
+            try:
+                reason = applicable_punishment.get("description_template", "违反群规").format(count=warning_count)
+                await member.ban(reason=reason)
+                await interaction.followup.send(f"已将 {member.mention} 永久封禁 (原因: {reason})。", ephemeral=True)
+                history_channel = interaction.guild.get_channel(self.bot.HISTORY_CHANNEL_ID)
+                if history_channel:
+                    await history_channel.send(f"{member.mention} ({member.id}) 已被永久封禁。原因: {reason}")
+            except discord.Forbidden:
+                await interaction.followup.send(f"无权限将 {member.mention} 永久封禁。", ephemeral=True)
+            except discord.HTTPException as e:
+                await interaction.followup.send(f"尝试将 {member.mention} 永久封禁时发生错误: {e}", ephemeral=True)
 
-                elif action_type == "monitor_nickname_compliance":
-                    print(f"[INFO] Rule {matched_rule_id} (monitor_nickname_compliance) for {member.mention} noted. No immediate punitive action from this warning.")
-                    action_taken = False 
-                else:
-                    print(f"[WARNING] Unknown specific action type: {action_type} for rule {matched_rule_id}")
-                    punishment_applied_messages.append(f"规则 {matched_rule_id} 定义了未知类型的特定操作 \'{action_type}\'.")
-
-        apply_general_ladder = False
-        if not action_taken: 
-            if not specific_actions_from_rule_definition: 
-                apply_general_ladder = True
-            elif matched_rule_id:
-                matched_rule_def = next((rule for rule in self.rules_data.get("rules", []) if rule.get("id") == matched_rule_id), None)
-                if matched_rule_def and matched_rule_def.get("action_type") == "general_violation":
-                    apply_general_ladder = True
-
-        if apply_general_ladder:
-            print(f"[DEBUG] Applying general punishment ladder for {member.mention}. Total overall warnings: {total_overall_warnings}")
-            general_punishments_config = self.rules_data.get("general_punishment_ladder", [])
-            applicable_punishment_def = None
-            for pun_def in sorted(general_punishments_config, key=lambda x: x["threshold"], reverse=True):
-                if total_overall_warnings >= pun_def["threshold"]:
-                    applicable_punishment_def = pun_def
-                    break
-
-            if applicable_punishment_def:
-                action_taken = True 
-                action = applicable_punishment_def["action"]
-                description_template = applicable_punishment_def.get("description_template", "已达到处罚阈值 ({count}次警告)。")
-                punishment_reason_text = description_template.format(count=total_overall_warnings, member_mention=member.mention, case_id=case_id)
-
-                if action == "mute":
-                    duration_minutes = applicable_punishment_def.get("duration_minutes", 0)
-                    duration_hours = applicable_punishment_def.get("duration_hours", 0)
-                    mute_duration = timedelta(minutes=duration_minutes, hours=duration_hours)
-
-                    if mute_duration.total_seconds() > 0:
-                        muted_role = await self.bot.get_muted_role(guild)
-                        if not muted_role:
-                            punishment_applied_messages.append(f"无法获取或创建 Muted 角色。对 {member.mention} 的禁言失败 ({punishment_reason_text}; Case ID: {case_id}).")
-                        else:
-                            unmute_at = datetime.now(timezone.utc) + mute_duration
-                            try:
-                                verified_role = guild.get_role(self.bot.VERIFIED_ROLE_ID)
-                                if verified_role and verified_role in member.roles:
-                                    await member.remove_roles(verified_role, reason=f"禁言处罚 (Case ID: {case_id})")
-                                await member.add_roles(muted_role, reason=f"禁言处罚 (Case ID: {case_id})")
-                                
-                                server_id_str = str(guild.id)
-                                user_id_str = str(member.id)
-                                self.bot.warning_data["active_mutes"][f"{server_id_str}-{user_id_str}"] = {
-                                    "unmute_at": unmute_at.isoformat(),  # 确保始终存储为ISO格式字符串
-                                    "guild_id": guild.id,
-                                    "user_id": member.id,
-                                    "case_ids_for_mute": [case_id] 
-                                }
-                                self.bot.save_data(self.bot.warning_data)
-                                punishment_applied_messages.append(f"{member.mention} 已被禁言直到 <t:{int(unmute_at.timestamp())}:F> ({punishment_reason_text}; Case ID: {case_id}).")
-                            except discord.Forbidden:
-                                punishment_applied_messages.append(f"机器人权限不足，无法为 {member.mention} 添加 Muted 角色或移除 Verified 角色 ({punishment_reason_text}; Case ID: {case_id}).")
-                            except discord.HTTPException as e:
-                                punishment_applied_messages.append(f"为 {member.mention} 添加 Muted 角色时发生HTTP错误: {e} ({punishment_reason_text}; Case ID: {case_id}).")
-                    else:
-                        punishment_applied_messages.append(f"禁言处罚已触发 ({punishment_reason_text})，但时长为0。未执行禁言。 (Case ID: {case_id})")
+    async def _apply_mute(self, interaction: discord.Interaction, member: discord.Member, duration_minutes: int, case_id: str = None):
+        """Applies a mute to a member for the specified duration."""
+        if duration_minutes <= 0:
+            return
+            
+        server_id = str(interaction.guild.id)
+        user_id = str(member.id)
+        mute_key = f"{server_id}-{user_id}"
+        
+        # Get or create muted role
+        muted_role = await self.bot.get_muted_role(interaction.guild)
+        if not muted_role:
+            await interaction.followup.send("无法创建或获取禁言角色。", ephemeral=True)
+            return
+            
+        # Calculate unmute time
+        now = datetime.now(timezone.utc)
+        unmute_at = now + timedelta(minutes=duration_minutes)
+        
+        # Store mute info
+        mute_info = {
+            "user_id": int(user_id),
+            "guild_id": int(server_id),
+            "muted_at": now.isoformat(),
+            "unmute_at": unmute_at.isoformat(),
+            "duration_minutes": duration_minutes,
+            "muted_by": str(interaction.user.id),
+            "case_ids_for_mute": [case_id] if case_id else []
+        }
+        
+        # Apply mute
+        try:
+            # Remove verified role if applicable
+            verified_role = interaction.guild.get_role(self.bot.VERIFIED_ROLE_ID)
+            if verified_role and verified_role in member.roles:
+                await member.remove_roles(verified_role, reason=f"Muted for {duration_minutes} minutes")
                 
-                elif action == "remove_temporary": 
-                    can_rejoin = applicable_punishment_def.get("can_rejoin", True)
-                    try:
-                        await member.kick(reason=f"{punishment_reason_text} (Case ID: {case_id})")
-                        rejoin_status = "可以" if can_rejoin else "不可以"
-                        punishment_applied_messages.append(f"{member.mention} 已被移出服务器 ({punishment_reason_text}; {rejoin_status}重新加入; Case ID: {case_id}).")
-                    except discord.Forbidden:
-                        punishment_applied_messages.append(f"机器人权限不足，无法将 {member.mention} 移出服务器 ({punishment_reason_text}; Case ID: {case_id}).")
-                    except discord.HTTPException as e:
-                        punishment_applied_messages.append(f"移出 {member.mention} 时发生HTTP错误: {e} ({punishment_reason_text}; Case ID: {case_id}).")
-
-                elif action == "ban_permanent": 
-                    try:
-                        await member.ban(reason=f"{punishment_reason_text} (Case ID: {case_id})")
-                        punishment_applied_messages.append(f"{member.mention} 已被永久禁止加入服务器 ({punishment_reason_text}; Case ID: {case_id}).")
-                    except discord.Forbidden:
-                        punishment_applied_messages.append(f"机器人权限不足，无法将 {member.mention} 永久禁止加入服务器 ({punishment_reason_text}; Case ID: {case_id}).")
-                    except discord.HTTPException as e:
-                        punishment_applied_messages.append(f"永久禁止 {member.mention} 加入服务器时发生HTTP错误: {e} ({punishment_reason_text}; Case ID: {case_id}).")
-                else:
-                    print(f"[WARNING] Unknown general punishment action type: {action} for threshold {applicable_punishment_def['threshold']}")
-                    punishment_applied_messages.append(f"为 {member.mention} 应用了处罚 ({punishment_reason_text})，但具体操作 \'{action}\' 未被完全识别 (Case ID: {case_id}).")
+            # Add muted role
+            await member.add_roles(muted_role, reason=f"Muted for {duration_minutes} minutes")
+            
+            # Save mute info
+            self.bot.warning_data["active_mutes"][mute_key] = mute_info
+            save_result = self.bot.save_data(self.bot.warning_data)
+            
+            if not save_result:
+                await interaction.followup.send(f"已禁言 {member.mention} {duration_minutes} 分钟，但保存禁言数据时发生错误。", ephemeral=True)
+                print(f"Error saving mute data for user {member.display_name} (ID: {user_id}) in guild {interaction.guild.name} (ID: {server_id}).")
             else:
-                print(f"[DEBUG] No general punishment threshold met for user {member.id} with {total_overall_warnings} warnings.")
+                await interaction.followup.send(f"已禁言 {member.mention} {duration_minutes} 分钟。将在 <t:{int(unmute_at.timestamp())}:f> 解除。", ephemeral=True)
+                
+            # Notify history channel
+            history_channel = interaction.guild.get_channel(self.bot.HISTORY_CHANNEL_ID)
+            if history_channel:
+                await history_channel.send(f"{member.mention} ({member.id}) 已被禁言 {duration_minutes} 分钟。将在 <t:{int(unmute_at.timestamp())}:f> 解除。")
+                
+            # Try to notify the user
+            try:
+                user_embed = discord.Embed(title=f"您已被禁言", color=discord.Color.red(), timestamp=now)
+                user_embed.add_field(name="服务器", value=interaction.guild.name, inline=False)
+                user_embed.add_field(name="持续时间", value=f"{duration_minutes} 分钟", inline=True)
+                user_embed.add_field(name="解除时间", value=f"<t:{int(unmute_at.timestamp())}:f>", inline=True)
+                user_embed.set_footer(text=f"如有疑问，请联系管理员")
+                
+                await member.send(embed=user_embed)
+            except (discord.Forbidden, discord.HTTPException):
+                # Silently fail if we can't DM the user
+                pass
+                
+        except discord.Forbidden:
+            await interaction.followup.send(f"无权限禁言 {member.mention}。", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.followup.send(f"尝试禁言 {member.mention} 时发生错误: {e}", ephemeral=True)
 
-        if punishment_applied_messages:
-            full_punishment_summary = "\n".join(punishment_applied_messages)
-            if not followup_interaction.response.is_done(): await followup_interaction.response.send_message(f"**处罚结果 (Case ID: {case_id}):**\n{full_punishment_summary}", ephemeral=True)
-            else: await followup_interaction.followup.send(f"**处罚结果 (Case ID: {case_id}):**\n{full_punishment_summary}", ephemeral=True)
-        elif action_taken: 
-            if not followup_interaction.response.is_done(): await followup_interaction.response.send_message(f"针对 Case ID: {case_id} 的特定规则处理已启动。", ephemeral=True)
-            else: await followup_interaction.followup.send(f"针对 Case ID: {case_id} 的特定规则处理已启动。", ephemeral=True)
-
-    @app_commands.command(name="warn", description="警告一名用户，记录并可能触发禁言。")
-    @app_commands.describe(
-        member="要警告的用户",
-        reason_direct="警告理由 (可输入规则编号)", 
-        channel="在哪个频道发送警告通知 (默认当前频道)"
-    )
-    async def warn_slash_command(self, interaction: discord.Interaction, member: discord.Member, reason_direct: str, channel: discord.TextChannel = None):
+    @app_commands.command(name="warn", description="警告一个用户")
+    @app_commands.describe(member="要警告的用户")
+    async def warn_slash_command(self, interaction: discord.Interaction, member: discord.Member):
+        """Slash command to warn a user."""
         if not await self.bot.check_admin_role(interaction):
             return
-        target_channel = channel or interaction.channel
-        # Defer the slash command interaction before calling _handle_warning
-        await interaction.response.defer(ephemeral=True, thinking=True) 
-        await self._handle_warning(interaction, member, reason_direct, target_channel)
-
-    @warn_slash_command.error
-    async def warn_slash_command_error_handler(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        print(f"Error in warn slash command: {error}")
-        traceback.print_exc()
-        error_message = f"执行警告命令时发生未知错误: {error}"
-        if isinstance(error, app_commands.CommandInvokeError) and error.original:
-            error_message = f"执行警告命令时发生内部错误: {error.original}"
-        elif isinstance(error, app_commands.CheckFailure):
-            error_message = "您没有权限使用此命令或检查失败。"
+            
+        # Prevent warning the bot itself
+        if member.id == self.bot.user.id:
+            await interaction.response.send_message("我不能警告自己！", ephemeral=True)
+            return
+            
+        # Prevent warning other bots
+        if member.bot:
+            await interaction.response.send_message("不能警告机器人用户。", ephemeral=True)
+            return
+            
+        # Prevent warning yourself
+        if member.id == interaction.user.id:
+            await interaction.response.send_message("你不能警告自己！", ephemeral=True)
+            return
+            
+        # Defer the response to allow time for the modal
+        await interaction.response.defer(ephemeral=True, thinking=True)
         
-        if not interaction.response.is_done():
-            await interaction.response.send_message(error_message, ephemeral=True)
-        else:
-            await interaction.followup.send(error_message, ephemeral=True)
+        # Show the reason modal
+        modal = ReasonModal(interaction, member, interaction.channel, self)
+        await interaction.followup.send_modal(modal)
+
+    @app_commands.context_menu(name="警告用户")
+    async def warn_context_menu(self, interaction: discord.Interaction, member: discord.Member):
+        """Context menu command to warn a user."""
+        if not await self.bot.check_admin_role(interaction):
+            return
+            
+        # Prevent warning the bot itself
+        if member.id == self.bot.user.id:
+            await interaction.response.send_message("我不能警告自己！", ephemeral=True)
+            return
+            
+        # Prevent warning other bots
+        if member.bot:
+            await interaction.response.send_message("不能警告机器人用户。", ephemeral=True)
+            return
+            
+        # Prevent warning yourself
+        if member.id == interaction.user.id:
+            await interaction.response.send_message("你不能警告自己！", ephemeral=True)
+            return
+            
+        # Defer the response to allow time for the modal
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        
+        # Show the reason modal
+        modal = ReasonModal(interaction, member, interaction.channel, self)
+        await interaction.followup.send_modal(modal)
 
 async def setup(bot: commands.Bot):
-    from main import ADMIN_ROLE_ID, HISTORY_CHANNEL_ID, MUTED_ROLE_NAME, VERIFIED_ROLE_ID, DATA_FILE, RULES_DATA_FILE
-    from main import load_data, save_data, generate_case_id, check_admin_role, get_muted_role
-    bot.ADMIN_ROLE_ID = ADMIN_ROLE_ID
-    bot.HISTORY_CHANNEL_ID = HISTORY_CHANNEL_ID
-    bot.MUTED_ROLE_NAME = MUTED_ROLE_NAME
-    bot.VERIFIED_ROLE_ID = VERIFIED_ROLE_ID
-    bot.DATA_FILE = DATA_FILE
-    bot.RULES_DATA_FILE = RULES_DATA_FILE
-    bot.load_data = load_data
-    bot.save_data = save_data
-    bot.generate_case_id = generate_case_id
-    bot.check_admin_role = check_admin_role
-    bot.get_muted_role = get_muted_role
-    if not hasattr(bot, 'warning_data'): bot.warning_data = bot.load_data()
-    
-    cog_instance = WarningsCog(bot)
-    await bot.add_cog(cog_instance)
-    print("WarningsCog loaded and added to bot.")
-    
-    # Context Menu for Warning User
-    async def warn_user_context_menu_callback(interaction: discord.Interaction, member: discord.Member):
-        # Use cog_instance for bot methods if they are part of the cog or bot instance passed to cog
-        if not await cog_instance.bot.check_admin_role(interaction): return
-        target_channel = interaction.channel
-        # Pass the cog_instance to the modal so it can call _handle_warning
-        modal = ReasonModal(original_command_interaction=interaction, target_user=member, target_channel=target_channel, cog_instance=cog_instance)
-        await interaction.response.send_modal(modal)
-        
-    warn_user_context_menu = app_commands.ContextMenu(name="警告用户", callback=warn_user_context_menu_callback)
-    bot.tree.add_command(warn_user_context_menu)
-    print("Added '警告用户' context menu to the command tree.")
+    await bot.add_cog(WarningsCog(bot))

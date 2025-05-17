@@ -13,13 +13,17 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 # --- Constants ---
-TOKEN = "YOUR_BOT_TOKEN_HERE" # Replace with your actual bot token
-DATA_FILE = "/home/ubuntu/discord_bot/warnings_data.json"
+# 使用环境变量获取TOKEN，如果不存在则使用默认值
+TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+# 使用相对路径，便于跨平台部署
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "warnings_data.json")
+RULES_DATA_FILE = os.path.join(BASE_DIR, "rules_database.json")
+
 ADMIN_ROLE_ID = 959251532535169065
 HISTORY_CHANNEL_ID = 1076394033003368449
 MUTED_ROLE_NAME = "Muted"
 VERIFIED_ROLE_ID = 881855912908845077 # Role to be removed on mute and restored on unmute
-RULES_DATA_FILE = "/home/ubuntu/discord_bot/rules_database.json"
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -45,16 +49,21 @@ def load_data():
                 return data
         except json.JSONDecodeError:
             print(f"Error decoding JSON from {DATA_FILE}. Starting with empty data.")
-            return {"warnings": {}, "active_mutes": {}}
-    return {"warnings": {}, "active_mutes": {}}
+            return {"warnings": {}, "active_mutes": {}, "member_activity": {}}
+    return {"warnings": {}, "active_mutes": {}, "member_activity": {}}
 
 def save_data(data):
     """Saves warning data to the JSON file."""
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
+        return True
     except IOError as e:
         print(f"Error saving data to {DATA_FILE}: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error saving data to {DATA_FILE}: {e}")
+        return False
 
 # --- Utility Functions ---
 def generate_case_id():
@@ -124,8 +133,16 @@ async def on_member_join(member: discord.Member):
         "guild_id": server_id
     }
 
+    # 确保所有必要的字典键都已初始化
+    if not hasattr(bot, "warning_data"):
+        bot.warning_data = load_data()
+    
+    if "member_activity" not in bot.warning_data:
+        bot.warning_data["member_activity"] = {}
+    
     if server_id not in bot.warning_data["member_activity"]:
         bot.warning_data["member_activity"][server_id] = {}
+    
     if user_id not in bot.warning_data["member_activity"][server_id]:
         bot.warning_data["member_activity"][server_id][user_id] = []
     
@@ -133,10 +150,55 @@ async def on_member_join(member: discord.Member):
     save_data(bot.warning_data)
     print(f"Member {member.display_name} (ID: {user_id}) joined guild {member.guild.name} (ID: {server_id}). Event logged.")
 
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """Called when a member leaves or is removed from the guild."""
+    server_id = str(member.guild.id)
+    user_id = str(member.id)
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+
+    activity_entry = {
+        "type": "leave",
+        "timestamp": timestamp,
+        "user_id": user_id,
+        "guild_id": server_id
+    }
+
+    # 确保所有必要的字典键都已初始化
+    if not hasattr(bot, "warning_data"):
+        bot.warning_data = load_data()
+    
+    if "member_activity" not in bot.warning_data:
+        bot.warning_data["member_activity"] = {}
+    
+    if server_id not in bot.warning_data["member_activity"]:
+        bot.warning_data["member_activity"][server_id] = {}
+    
+    if user_id not in bot.warning_data["member_activity"][server_id]:
+        bot.warning_data["member_activity"][server_id][user_id] = []
+    
+    bot.warning_data["member_activity"][server_id][user_id].append(activity_entry)
+    save_data(bot.warning_data)
+    print(f"Member {member.display_name} (ID: {user_id}) left guild {member.guild.name} (ID: {server_id}). Event logged.")
+
+@bot.event
 async def setup_hook():
     """Asynchronously called after login but before connecting to the Websocket."""
     print("Running setup_hook...")
     bot.warning_data = load_data() # Load data early
+    
+    # 添加必要的方法到bot对象，确保其他cog可以访问
+    bot.save_data = save_data
+    bot.generate_case_id = generate_case_id
+    bot.check_admin_role = check_admin_role
+    bot.get_muted_role = get_muted_role
+    
+    # 添加常量到bot对象，确保其他cog可以访问
+    bot.ADMIN_ROLE_ID = ADMIN_ROLE_ID
+    bot.HISTORY_CHANNEL_ID = HISTORY_CHANNEL_ID
+    bot.MUTED_ROLE_NAME = MUTED_ROLE_NAME
+    bot.VERIFIED_ROLE_ID = VERIFIED_ROLE_ID
+    bot.RULES_DATA_FILE = RULES_DATA_FILE
 
     # Load cogs (extensions)
     try:
@@ -172,8 +234,6 @@ async def setup_hook():
 
     print("setup_hook completed.")
 
-bot.setup_hook = setup_hook
-
 # --- Main Execution ---
 if __name__ == "__main__":
     # This part is for direct execution. 
@@ -195,5 +255,3 @@ if __name__ == "__main__":
         print(f"An error occurred while running the bot: {e}")
     finally:
         print("Bot has been shut down.")
-
-

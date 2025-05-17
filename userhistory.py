@@ -6,13 +6,48 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
-import json # Added import json
+import json
 from datetime import datetime, timezone
 import traceback
 
 class UserHistoryCog(commands.Cog, name="UserHistory"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # 尝试加载rules_data
+        self.rules_data = self._load_rules_data()
+
+    def _load_rules_data(self):
+        """加载规则数据，确保在_handle_unmute_due_to_clear中可用"""
+        try:
+            with open(self.bot.RULES_DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 验证规则数据的基本结构
+                if not isinstance(data, dict):
+                    print(f"ERROR: Rules data at {self.bot.RULES_DATA_FILE} is not a valid JSON object. Returning empty rules.")
+                    return {"rules": [], "general_punishment_ladder": []}
+                
+                # 确保必要的键存在
+                if "rules" not in data:
+                    print(f"WARNING: Rules data at {self.bot.RULES_DATA_FILE} is missing 'rules' key. Adding empty rules list.")
+                    data["rules"] = []
+                
+                if "general_punishment_ladder" not in data:
+                    print(f"WARNING: Rules data at {self.bot.RULES_DATA_FILE} is missing 'general_punishment_ladder' key. Adding empty ladder.")
+                    data["general_punishment_ladder"] = []
+                
+                return data
+        except FileNotFoundError:
+            print(f"ERROR: Rules data file not found at {self.bot.RULES_DATA_FILE}. Returning empty rules.")
+            return {"rules": [], "general_punishment_ladder": []}
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Could not decode JSON from {self.bot.RULES_DATA_FILE}: {e}. Returning empty rules.")
+            return {"rules": [], "general_punishment_ladder": []}
+        except AttributeError:
+            print(f"ERROR: bot.RULES_DATA_FILE not set. Ensure RULES_DATA_FILE is passed from main.py during setup. Returning empty rules.")
+            return {"rules": [], "general_punishment_ladder": []}
+        except Exception as e:
+            print(f"ERROR: Unexpected error loading rules data: {e}. Returning empty rules.")
+            return {"rules": [], "general_punishment_ladder": []}
 
     async def _handle_unmute_due_to_clear(self, guild: discord.Guild, member: discord.Member, interaction_for_followup: discord.Interaction, case_id_cleared: str):
         """Handles unmuting a user if a cleared warning drops them below the threshold."""
@@ -33,17 +68,14 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
             # The original logic used new_total_warnings < 2. We'll use active_warning_count.
             
             # Determine the current punishment level based on active_warning_count
-            # This requires access to the punishment ladder logic, which is in WarningsCog.
-            # For now, let's assume a simple threshold (e.g., < 2 active warnings means unmute if muted for general reasons)
-            # A more robust solution would be to re-evaluate against the actual punishment ladder.
             should_unmute = True # Default to true if mute exists and we are re-evaluating
             
             # Find the relevant punishment from the ladder based on `active_warning_count`
-            general_punishments_config = self.bot.rules_data.get("general_punishment_ladder", [])
+            general_punishments_config = self.rules_data.get("general_punishment_ladder", [])
             current_punishment_level_action = None
-            for pun_def in sorted(general_punishments_config, key=lambda x: x["threshold"], reverse=True):
-                if active_warning_count >= pun_def["threshold"]:
-                    current_punishment_level_action = pun_def["action"]
+            for pun_def in sorted(general_punishments_config, key=lambda x: x.get("threshold", 0), reverse=True):
+                if active_warning_count >= pun_def.get("threshold", 0):
+                    current_punishment_level_action = pun_def.get("action")
                     break
             
             if current_punishment_level_action == "mute":
@@ -57,7 +89,9 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                         # The mute should ideally be tied to specific warning instances or a re-evaluation of the mute duration.
                         # For now, if case_ids_for_mute becomes empty, but they still qualify for a mute, the mute remains.
                         pass # Mute remains based on count
-                    self.bot.save_data(self.bot.warning_data)
+                    save_result = self.bot.save_data(self.bot.warning_data)
+                    if not save_result:
+                        print(f"[Unmute Check] Failed to save data after updating case_ids_for_mute for {member.display_name}")
             else:
                 print(f"[Unmute Check for {member.display_name}] No longer meets mute criteria based on {active_warning_count} active warnings.")
                 should_unmute = True
@@ -75,7 +109,10 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                             await member.add_roles(verified_role, reason="Mute lifted, restoring verified role")
                         
                         del self.bot.warning_data["active_mutes"][mute_key]
-                        self.bot.save_data(self.bot.warning_data)
+                        save_result = self.bot.save_data(self.bot.warning_data)
+                        if not save_result:
+                            print(f"[Unmute Check] Failed to save data after unmuting {member.display_name}")
+                            
                         await interaction_for_followup.followup.send(f"{member.mention} 的禁言已因记录清除 (Case ID: {case_id_cleared}) 而解除。他们的认证角色（如果适用）已恢复。", ephemeral=True)
                         history_channel = self.bot.get_channel(self.bot.HISTORY_CHANNEL_ID)
                         if history_channel:
@@ -83,7 +120,9 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                     else:
                         if mute_key in self.bot.warning_data["active_mutes"]:
                             del self.bot.warning_data["active_mutes"][mute_key]
-                            self.bot.save_data(self.bot.warning_data)
+                            save_result = self.bot.save_data(self.bot.warning_data)
+                            if not save_result:
+                                print(f"[Unmute Check] Failed to save data after removing mute entry for {member.display_name}")
                         await interaction_for_followup.followup.send(f"记录已清除。用户已不在禁言状态或数据不一致。", ephemeral=True)
                 except discord.Forbidden:
                     await interaction_for_followup.followup.send(f"记录已清除，但机器人权限不足以解除 {member.mention} 的禁言或恢复角色。", ephemeral=True)
@@ -98,6 +137,7 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
     @app_commands.command(name="note", description="为用户添加一条管理备注。")
     @app_commands.describe(member="要添加备注的用户", text="备注内容")
     async def note_slash_command(self, interaction: discord.Interaction, member: discord.Member, text: str):
+        """添加管理备注，不会计入警告总数，也不会通知用户或历史频道"""
         if not await self.bot.check_admin_role(interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -124,9 +164,13 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
             self.bot.warning_data["warnings"][server_id][user_id] = {"entries": [], "total_warnings": 0, "per_rule_violations": {}}
         
         self.bot.warning_data["warnings"][server_id][user_id]["entries"].append(note_entry)
-        self.bot.save_data(self.bot.warning_data)
-
-        await interaction.followup.send(f"已为用户 {member.mention} 添加备注 (Case ID: {case_id})。", ephemeral=True)
+        save_result = self.bot.save_data(self.bot.warning_data)
+        
+        if not save_result:
+            await interaction.followup.send(f"警告：保存备注数据时发生错误。备注可能不会持久保存。", ephemeral=True)
+            print(f"Error saving note data for user {member.display_name} (ID: {user_id}) in guild {interaction.guild.name} (ID: {server_id}).")
+        else:
+            await interaction.followup.send(f"已为用户 {member.mention} 添加备注 (Case ID: {case_id})。", ephemeral=True)
 
     @app_commands.command(name="clear", description="清除一条用户的管理记录 (警告或备注)。")
     @app_commands.describe(case_id="要清除的记录的Case ID")
@@ -146,9 +190,12 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
             await interaction.followup.send(f"Case ID `{case_id}` 不存在 (服务器无记录)。", ephemeral=True)
             return
 
+        # 统一大写处理case_id
+        case_id = case_id.upper()
+
         for user_id_str, user_data in self.bot.warning_data["warnings"][server_id].items():
             for entry in user_data.get("entries", []):
-                if entry.get("case_id") == case_id.upper() and entry.get("status", "active") == "active":
+                if entry.get("case_id") == case_id and entry.get("status", "active") == "active":
                     entry_to_clear = entry
                     target_user_id = user_id_str
                     entry_type = entry.get("entry_type", "unknown")
@@ -199,7 +246,10 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                 except Exception as e:
                     print(f"Error editing history message for case {case_id}: {e}")
 
-        self.bot.save_data(self.bot.warning_data)
+        save_result = self.bot.save_data(self.bot.warning_data)
+        if not save_result:
+            await interaction.followup.send(f"警告：保存清除记录时发生错误。清除操作可能不会持久保存。", ephemeral=True)
+            print(f"Error saving data after clearing record (Case ID: {case_id}) for user ID {target_user_id} in guild {interaction.guild.name} (ID: {server_id}).")
         
         target_member = interaction.guild.get_member(int(target_user_id))
         if not target_member:
@@ -218,6 +268,7 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
     @app_commands.command(name="userhistory", description="查询用户的管理记录 (警告和备注)。")
     @app_commands.describe(member="要查询历史的用户")
     async def userhistory_slash_command(self, interaction: discord.Interaction, member: discord.Member):
+        """查询用户的管理记录，包括警告和备注"""
         if not await self.bot.check_admin_role(interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -231,8 +282,16 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
             await interaction.followup.send(f"{member.mention} 没有管理记录。", ephemeral=True)
             return
 
+        # 根据记录类型选择标题
+        has_warnings = any(e.get("entry_type") == "warning" and e.get("status", "active") == "active" for e in user_data.get("entries", []))
+        has_notes = any(e.get("entry_type") == "note" and e.get("status", "active") == "active" for e in user_data.get("entries", []))
+        
+        title = f"{member.display_name} 的管理记录"
+        if has_notes and not has_warnings:
+            title = f"{member.display_name} 的管理备注"
+        
         history_embed = discord.Embed(
-            title=f"{member.display_name} 的管理记录",
+            title=title,
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc)
         )
@@ -242,7 +301,7 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
         for entry in sorted(user_data["entries"], key=lambda x: x["timestamp"]):
             if entry.get("status", "active") == "cleared":
                 continue # Skip cleared entries for now, per user's desire for non-destructive delete
-            active_entries_count +=1
+            active_entries_count += 1
 
             entry_type_str = "未知类型"
             content_label = "内容"
@@ -261,6 +320,7 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                 entry_type_str = "离开服务器"
                 content_value = f"用户离开了服务器。"
             
+            # 按照知识模块要求格式化输出
             field_name = f"**{entry_type_str}** - <t:{entry['timestamp']}:f> (Case ID: {entry['case_id']})"
             field_value = f"操作者: {entry.get('operator_name', '系统')} ({entry.get('operator_id', 'N/A')})\n{content_label}: {content_value}"
             if entry.get("entry_type") == "warning" and entry.get("rule_id_matched"):
@@ -270,71 +330,25 @@ class UserHistoryCog(commands.Cog, name="UserHistory"):
                  history_embed.add_field(name=field_name, value=field_value, inline=False)
             else:
                 if not history_embed.footer.text or "更多记录未显示" not in history_embed.footer.text:
-                    history_embed.set_footer(text=history_embed.footer.text + " | 更多记录未显示 (已达上限)")
+                    history_embed.set_footer(text=f"共 {active_entries_count} 条记录 | 更多记录未显示 (已达上限)")
                 break 
 
-        total_active_warnings = sum(1 for e in user_data.get("entries", []) if e.get("entry_type") == "warning" and e.get("status", "active") == "active")
-        footer_text = f"当前有效警告总数: {total_active_warnings}"
+        # 添加总计信息
+        total_warnings = user_data.get("total_warnings", 0)
+        if total_warnings > 0:
+            history_embed.add_field(name="当前有效警告总数", value=str(total_warnings), inline=True)
         
-        per_rule_violations_active = {k: v for k,v in user_data.get("per_rule_violations", {}).items() if v > 0}
-        if per_rule_violations_active:
-            rules_violated_str = ", ".join([f"规则{k}: {v}次" for k,v in per_rule_violations_active.items()])
-            footer_text += f" | 规则违反统计: {rules_violated_str}"
-        history_embed.set_footer(text=footer_text)
-
-        if active_entries_count == 0:
-             await interaction.followup.send(f"{member.mention} 没有有效的管理记录。", ephemeral=True)
-             return
-
-        try:
-            await interaction.followup.send(embed=history_embed, ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.followup.send(f"无法发送完整的历史记录，可能过长。错误: {e}", ephemeral=True)
-
-    @note_slash_command.error
-    @clear_slash_command.error
-    @userhistory_slash_command.error
-    async def on_userhistory_related_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        print(f"Error in UserHistoryCog command: {error}")
-        traceback.print_exc()
-        error_message = f"执行命令时发生未知错误: {error}"
-        if isinstance(error, app_commands.CommandInvokeError) and error.original:
-            error_message = f"执行命令时发生内部错误: {error.original}"
-        elif isinstance(error, app_commands.CheckFailure):
-            error_message = "您没有权限使用此命令。"
+        # 添加规则违反信息
+        per_rule_violations = user_data.get("per_rule_violations", {})
+        if per_rule_violations:
+            rule_violations_text = "\n".join([f"规则 {rule_id}: {count} 次" for rule_id, count in per_rule_violations.items()])
+            history_embed.add_field(name="规则违反统计", value=rule_violations_text, inline=True)
         
-        if interaction.response.is_done():
-            await interaction.followup.send(error_message, ephemeral=True)
-        else:
-            await interaction.response.send_message(error_message, ephemeral=True)
+        # 设置页脚
+        if not history_embed.footer.text:
+            history_embed.set_footer(text=f"共 {active_entries_count} 条记录")
+        
+        await interaction.followup.send(embed=history_embed, ephemeral=True)
 
 async def setup(bot: commands.Bot):
-    from main import ADMIN_ROLE_ID, HISTORY_CHANNEL_ID, MUTED_ROLE_NAME, VERIFIED_ROLE_ID, DATA_FILE, RULES_DATA_FILE
-    from main import load_data, save_data, generate_case_id, check_admin_role, get_muted_role
-
-    bot.ADMIN_ROLE_ID = ADMIN_ROLE_ID
-    bot.HISTORY_CHANNEL_ID = HISTORY_CHANNEL_ID
-    bot.MUTED_ROLE_NAME = MUTED_ROLE_NAME
-    bot.VERIFIED_ROLE_ID = VERIFIED_ROLE_ID
-    bot.DATA_FILE = DATA_FILE
-    bot.RULES_DATA_FILE = RULES_DATA_FILE # For _handle_unmute_due_to_clear
-
-    bot.load_data = load_data
-    bot.save_data = save_data
-    bot.generate_case_id = generate_case_id
-    bot.check_admin_role = check_admin_role
-    bot.get_muted_role = get_muted_role
-    
-    if not hasattr(bot, 'warning_data'):
-        bot.warning_data = bot.load_data()
-    if not hasattr(bot, 'rules_data'): # Load rules data if not present, needed for unmute logic
-        try:
-            with open(bot.RULES_DATA_FILE, "r", encoding="utf-8") as f:
-                bot.rules_data = json.load(f)
-        except Exception as e:
-            print(f"Critical error: Could not load rules_database.json in UserHistoryCog setup: {e}")
-            bot.rules_data = {"rules": [], "general_punishment_ladder": []} # Fallback
-
     await bot.add_cog(UserHistoryCog(bot))
-    print("UserHistoryCog loaded with /note and /clear commands.")
-
